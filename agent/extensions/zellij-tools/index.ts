@@ -229,7 +229,13 @@ function renderTaskLines(expanded = false): string[] {
 function updateWidget(ctx: any, expanded = false) {
   if (!ctx?.hasUI) return;
   const lines = renderTaskLines(expanded);
-  ctx.ui.setWidget("zellij-tasks", lines.length ? lines : undefined);
+  if (!lines.length) return ctx.ui.setWidget("zellij-tasks", undefined);
+  ctx.ui.setWidget("zellij-tasks", (_tui: any, theme: any) => ({
+    render(width: number): string[] {
+      return lines.map((line) => theme.fg("dim", line.length > width ? `${line.slice(0, Math.max(0, width - 1))}…` : line));
+    },
+    invalidate(): void {},
+  }));
 }
 
 async function handleZellijEvent(pi: ExtensionAPI, ctx: any, event: ZellijEvent, file?: string) {
