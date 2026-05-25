@@ -9,6 +9,7 @@ Personal Pi coding-agent configuration.
 - `agent/mcp.json` - MCP server config (no tokens)
 - `agent/extensions/zellij-tools/` - custom Zellij tools for Pi
 - `agent/extensions/pi-pool-cooldown.ts` - account-pool cooldown/status extension
+- `skills/zellij/` - skill instructions for using the custom Zellij tools
 
 Secrets and local state are intentionally excluded (`auth.json`, OAuth tokens, sessions, npm installs, account pool data).
 
@@ -22,6 +23,8 @@ cp agent/settings.json ~/.pi/agent/settings.json
 cp agent/keybindings.json ~/.pi/agent/keybindings.json
 cp agent/mcp.json ~/.pi/agent/mcp.json
 rsync -a agent/extensions/ ~/.pi/agent/extensions/
+mkdir -p ~/.agents/skills
+rsync -a skills/zellij/ ~/.agents/skills/zellij/
 ```
 
 Then restart Pi or run `/reload`.
