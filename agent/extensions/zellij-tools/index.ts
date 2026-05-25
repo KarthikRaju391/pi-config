@@ -497,6 +497,32 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("zellij-cleanup", {
+    description: "Close/clear tracked Zellij tasks. Usage: /zellij-cleanup [active|stopped|all]. Default active",
+    handler: async (args, ctx) => {
+      const mode = (args || "active").trim() || "active";
+      const state = readState();
+      const activeStatuses = new Set<TaskStatus>(["starting", "running", "ready", "unknown"]);
+      const shouldClose = (t: ZellijTask) => mode === "all" ? true : mode === "active" ? activeStatuses.has(t.status) : false;
+      let closed = 0;
+      for (const task of state.tasks) {
+        if (!shouldClose(task)) continue;
+        const result = await exec(pi, [...sessionArgs(task.session), "action", "close-pane", "--pane-id", task.pane_id], 10_000);
+        if (result.code === 0) {
+          task.status = "closed";
+          task.updated_at = Date.now();
+          closed++;
+        }
+      }
+      let kept = state.tasks;
+      if (mode === "stopped") kept = state.tasks.filter((t) => activeStatuses.has(t.status));
+      else if (mode === "all") kept = [];
+      writeState({ version: 1, tasks: kept });
+      refreshWidget(ctx);
+      ctx.ui.notify(`zellij cleanup ${mode}: closed ${closed}, tracking ${kept.length}`, "info");
+    },
+  });
+
   pi.registerCommand("zellij-dashboard", {
     description: "Toggle or control the Zellij task dashboard. Usage: /zellij-dashboard [toggle|expand|collapse]",
     handler: async (args, ctx) => {
@@ -527,7 +553,7 @@ export default function (pi: ExtensionAPI) {
     eventWatcher?.close();
     eventWatcher = undefined;
   });
-  pi.on("before_agent_start", async (_event, ctx) => updateWidget(ctx));
+  pi.on("before_agent_start", async (_event, ctx) => refreshWidget(ctx));
 
   pi.on("tool_call", async (event) => {
     if (event.toolName !== "bash") return;
