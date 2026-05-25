@@ -50,6 +50,7 @@ const RunParams = {
     session: S.string("Zellij session name. Defaults to agent-observer"),
     detached: S.boolean("Use/create a detached background session. Default true"),
     direction: S.string("Split direction for attached sessions: right or down. Default right"),
+    placement: S.string("Where to open the task: tab or pane. Default tab for detached sessions, pane for attached sessions"),
     subscribe: S.boolean("Return subscribe command. Default true"),
     notify_agent_on_exit: S.boolean("Write a zellij-task-event message when the command exits. Default true"),
     trigger_agent_on_exit: S.boolean("Automatically wake/continue the agent when the command exits. Default true"),
@@ -274,6 +275,20 @@ function makeSubscribeCommand(session: string | undefined, paneId: string, scrol
   return `${prefix} subscribe --pane-id ${q(paneId)} --format json --scrollback ${scrollback}`;
 }
 
+async function findPaneIdForTab(pi: ExtensionAPI, session: string | undefined, tabId: string, name: string): Promise<string | undefined> {
+  for (let i = 0; i < 10; i++) {
+    const result = await exec(pi, [...sessionArgs(session), "action", "list-panes", "--json", "--all"], 10_000);
+    try {
+      const panes = JSON.parse(result.stdout || "[]");
+      const pane = panes.find((p: any) => !p.is_plugin && String(p.tab_id) === String(tabId) && !p.exited)
+        || panes.find((p: any) => !p.is_plugin && p.tab_name === name && !p.exited);
+      if (pane) return `terminal_${pane.id}`;
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return undefined;
+}
+
 function looksLongRunning(command: string): boolean {
   const c = command.trim();
   return [
@@ -301,6 +316,7 @@ export default function (pi: ExtensionAPI) {
       const detached = params.detached !== false;
       const name = params.name || "pi-task";
       const direction = params.direction || "right";
+      const placement = params.placement || (detached ? "tab" : "pane");
       const cwd = params.cwd || ctx.cwd;
       const taskId = newTaskId();
       const notifyAgentOnExit = params.notify_agent_on_exit !== false;
@@ -311,26 +327,41 @@ export default function (pi: ExtensionAPI) {
         await exec(pi, ["attach", "--create-background", session, "options", "--web-sharing", "on", "--web-server", "true"], 20_000);
       }
 
-      const args = [
-        ...sessionArgs(session),
-        "action", "new-pane",
-        "-n", name,
-        "--cwd", cwd,
-      ];
-      if (!detached) args.push("-d", direction);
-      args.push("--", "zsh", "-ic", command);
-
-      const result = await exec(pi, args, 30_000);
-      if (result.code !== 0) {
-        return { content: [{ type: "text", text: `Failed to create Zellij pane:\n${result.stderr || result.stdout}` }], isError: true, details: { exitCode: result.code } };
+      let result: Awaited<ReturnType<typeof exec>>;
+      let paneId: string | undefined;
+      let tabId: string | undefined;
+      if (placement === "tab") {
+        const args = [
+          ...sessionArgs(session),
+          "action", "new-tab",
+          "-n", name,
+          "--cwd", cwd,
+          "--", "zsh", "-ic", command,
+        ];
+        result = await exec(pi, args, 30_000);
+        tabId = result.stdout.trim().split(/\s+/).find((x) => /^\d+$/.test(x)) || result.stdout.trim();
+        if (result.code === 0) paneId = await findPaneIdForTab(pi, session, tabId, name);
+      } else {
+        const args = [
+          ...sessionArgs(session),
+          "action", "new-pane",
+          "-n", name,
+          "--cwd", cwd,
+        ];
+        if (!detached) args.push("-d", direction);
+        args.push("--", "zsh", "-ic", command);
+        result = await exec(pi, args, 30_000);
+        paneId = result.stdout.trim().split(/\s+/).find((x) => x.startsWith("terminal_") || x.startsWith("plugin_")) || result.stdout.trim();
       }
-      const paneId = result.stdout.trim().split(/\s+/).find((x) => x.startsWith("terminal_") || x.startsWith("plugin_")) || result.stdout.trim();
+      if (result.code !== 0 || !paneId) {
+        return { content: [{ type: "text", text: `Failed to create Zellij ${placement}:\n${result.stderr || result.stdout}` }], isError: true, details: { exitCode: result.code, tab_id: tabId } };
+      }
       const task = upsertTask({ id: taskId, session, pane_id: paneId, name, cwd, command: params.command, status: "running", notify_agent_on_exit: notifyAgentOnExit, trigger_agent_on_exit: triggerAgentOnExit });
       updateWidget(ctx);
       const subscribeCommand = makeSubscribeCommand(session, paneId);
       return {
         content: [{ type: "text", text: `Started ${q(params.command)} in ${session}:${paneId}\nMonitor with:\n${subscribeCommand}` }],
-        details: { task_id: task.id, session, pane_id: paneId, name, cwd, command: params.command, subscribe_command: subscribeCommand },
+        details: { task_id: task.id, session, pane_id: paneId, tab_id: tabId, placement, name, cwd, command: params.command, subscribe_command: subscribeCommand },
       };
     },
   });

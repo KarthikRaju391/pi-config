@@ -42,7 +42,7 @@ Use normal `bash` for short, one-shot commands: `ls`, `rg`, `find`, `git status`
 
 Typical tool flow:
 
-1. `zellij_run` starts the command and returns `session` + `pane_id`.
+1. `zellij_run` starts the command and returns `session` + `pane_id`. By default detached tasks open in their own tab; use `placement: "pane"` only when a split is desired.
 2. `zellij_subscribe` streams recent output.
 3. `zellij_wait` waits for readiness/failure patterns.
 4. `zellij_snapshot` captures final screen state if needed.
@@ -60,6 +60,8 @@ Status updates happen when tools are used:
 - `zellij_close` marks it `closed`
 
 Prefer checking `zellij_tasks` before spawning long-running work if there may already be related panes.
+
+Default layout policy: open background observer tasks as tabs (`placement: "tab"`) so each task has a visible full pane. Use pane splits only for tightly related subtasks, and keep at most two panes per tab.
 
 ### Automatic completion events
 
