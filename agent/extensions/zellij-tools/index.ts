@@ -1,4 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 const S = {
   string: (description: string) => ({ type: "string", description }),
@@ -8,6 +11,23 @@ const S = {
 
 const DEFAULT_SESSION = "agent-observer";
 const DEFAULT_SCROLLBACK = 100;
+const STATE_FILE = path.join(os.homedir(), ".pi", "agent", "state", "zellij-tasks.json");
+
+type TaskStatus = "starting" | "running" | "ready" | "failed" | "exited" | "closed" | "unknown";
+type ZellijTask = {
+  id: string;
+  session?: string;
+  pane_id: string;
+  name: string;
+  cwd: string;
+  command: string;
+  status: TaskStatus;
+  created_at: number;
+  updated_at: number;
+  last_snapshot?: string;
+  last_exit_code?: number | null;
+};
+type ZellijState = { version: 1; tasks: ZellijTask[] };
 
 const RunParams = {
   type: "object",
@@ -68,6 +88,78 @@ const ListParams = {
   required: [],
   additionalProperties: false,
 } as const;
+
+const TasksParams = {
+  type: "object",
+  properties: {
+    refresh: S.boolean("Refresh statuses from Zellij before returning. Default true"),
+  },
+  required: [],
+  additionalProperties: false,
+} as const;
+
+
+function readState(): ZellijState {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+    return { version: 1, tasks: Array.isArray(parsed.tasks) ? parsed.tasks : [] };
+  } catch {
+    return { version: 1, tasks: [] };
+  }
+}
+
+function writeState(state: ZellijState) {
+  fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true, mode: 0o700 });
+  const tmp = `${STATE_FILE}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(tmp, STATE_FILE);
+}
+
+function upsertTask(patch: Partial<ZellijTask> & { pane_id: string }): ZellijTask {
+  const state = readState();
+  const now = Date.now();
+  const existing = state.tasks.find((t) => t.pane_id === patch.pane_id && (patch.session === undefined || t.session === patch.session));
+  const task: ZellijTask = existing
+    ? { ...existing, ...patch, updated_at: now }
+    : {
+        id: `zt_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+        session: patch.session,
+        pane_id: patch.pane_id,
+        name: patch.name || patch.pane_id,
+        cwd: patch.cwd || "",
+        command: patch.command || "",
+        status: patch.status || "running",
+        created_at: now,
+        updated_at: now,
+        last_exit_code: null,
+      };
+  if (existing) state.tasks[state.tasks.indexOf(existing)] = task;
+  else state.tasks.unshift(task);
+  state.tasks = state.tasks.slice(0, 50);
+  writeState(state);
+  return task;
+}
+
+function statusIcon(status: TaskStatus): string {
+  return ({ starting: "⏳", running: "▶", ready: "✅", failed: "❌", exited: "■", closed: "×", unknown: "?" } as Record<TaskStatus, string>)[status] || "?";
+}
+
+function renderTaskLines(): string[] {
+  const tasks = readState().tasks;
+  const active = tasks.filter((t) => !["closed", "exited", "failed"].includes(t.status));
+  if (tasks.length === 0) return [];
+  const counts = tasks.reduce<Record<string, number>>((acc, t) => ((acc[t.status] = (acc[t.status] || 0) + 1), acc), {});
+  const summary = `🧩 zellij ${active.length} active / ${tasks.length} tracked` +
+    Object.entries(counts).map(([k, v]) => ` · ${k}:${v}`).join("");
+  const recent = tasks.slice(0, 3).map((t) => `${statusIcon(t.status)} ${t.name} ${t.session ? `${t.session}:` : ""}${t.pane_id}`);
+  return [summary, ...recent];
+}
+
+function updateWidget(ctx: any) {
+  if (!ctx?.hasUI) return;
+  const lines = renderTaskLines();
+  ctx.ui.setWidget("zellij-tasks", lines.length ? lines : undefined);
+}
 
 function q(s: string): string {
   return JSON.stringify(s);
@@ -131,10 +223,12 @@ export default function (pi: ExtensionAPI) {
         return { content: [{ type: "text", text: `Failed to create Zellij pane:\n${result.stderr || result.stdout}` }], isError: true, details: { exitCode: result.code } };
       }
       const paneId = result.stdout.trim().split(/\s+/).find((x) => x.startsWith("terminal_") || x.startsWith("plugin_")) || result.stdout.trim();
+      const task = upsertTask({ session, pane_id: paneId, name, cwd, command: params.command, status: "running" });
+      updateWidget(ctx);
       const subscribeCommand = makeSubscribeCommand(session, paneId);
       return {
         content: [{ type: "text", text: `Started ${q(params.command)} in ${session}:${paneId}\nMonitor with:\n${subscribeCommand}` }],
-        details: { session, pane_id: paneId, name, cwd, command: params.command, subscribe_command: subscribeCommand },
+        details: { task_id: task.id, session, pane_id: paneId, name, cwd, command: params.command, subscribe_command: subscribeCommand },
       };
     },
   });
@@ -144,12 +238,14 @@ export default function (pi: ExtensionAPI) {
     label: "Zellij Subscribe",
     description: "Collect live rendered output from a Zellij pane for a few seconds using zellij subscribe.",
     parameters: SubscribeParams,
-    async execute(_id, params) {
+    async execute(_id, params, _signal, _onUpdate, ctx) {
       const seconds = params.seconds ?? 3;
       const format = params.format || "json";
       const scrollback = params.scrollback ?? DEFAULT_SCROLLBACK;
       const shell = `${makeSubscribeCommand(params.session, params.pane_id, scrollback).replace("--format json", `--format ${format}`)} & pid=$!; sleep ${seconds}; kill $pid 2>/dev/null; wait $pid 2>/dev/null || true`;
       const result = await pi.exec("bash", ["-lc", shell], { timeout: (seconds + 5) * 1000 });
+      upsertTask({ session: params.session, pane_id: params.pane_id, status: result.code === 0 ? "running" : "unknown", last_snapshot: (result.stdout || result.stderr || "").slice(-4000) });
+      updateWidget(ctx);
       return { content: [{ type: "text", text: result.stdout || result.stderr || "" }], details: { exitCode: result.code } };
     },
   });
@@ -159,7 +255,7 @@ export default function (pi: ExtensionAPI) {
     label: "Zellij Wait",
     description: "Wait until a regex appears in a Zellij pane's subscribed output; optionally fail early on another regex.",
     parameters: WaitParams,
-    async execute(_id, params) {
+    async execute(_id, params, _signal, _onUpdate, ctx) {
       const timeout = params.timeout_seconds ?? 60;
       const cmd = `zellij ${params.session ? `--session ${q(params.session)} ` : ""}subscribe --pane-id ${q(params.pane_id)} --format raw --scrollback ${DEFAULT_SCROLLBACK}`;
       const failCheck = params.fail_pattern
@@ -183,6 +279,8 @@ export default function (pi: ExtensionAPI) {
       const result = await pi.exec("bash", ["-lc", script], { timeout: (timeout + 5) * 1000 });
       const ok = result.code === 0;
       const failed = result.code === 2;
+      upsertTask({ session: params.session, pane_id: params.pane_id, status: ok ? "ready" : failed ? "failed" : "unknown", last_snapshot: (result.stdout || result.stderr || "").slice(-4000) });
+      updateWidget(ctx);
       return { content: [{ type: "text", text: ok ? `Matched ${params.pattern}\n${result.stdout}` : `${failed ? "Fail pattern matched" : `Did not match ${params.pattern}`} (exit ${result.code})\n${result.stdout || result.stderr}` }], isError: !ok, details: { exitCode: result.code } };
     },
   });
@@ -203,8 +301,10 @@ export default function (pi: ExtensionAPI) {
     label: "Zellij Snapshot",
     description: "Dump the current rendered pane contents, including scrollback.",
     parameters: PaneParams,
-    async execute(_id, params) {
+    async execute(_id, params, _signal, _onUpdate, ctx) {
       const result = await exec(pi, [...sessionArgs(params.session), "action", "dump-screen", "--pane-id", params.pane_id, "--full"], 20_000);
+      upsertTask({ session: params.session, pane_id: params.pane_id, status: result.code === 0 ? "running" : "unknown", last_snapshot: (result.stdout || result.stderr || "").slice(-4000) });
+      updateWidget(ctx);
       return { content: [{ type: "text", text: result.stdout || result.stderr }], isError: result.code !== 0, details: { exitCode: result.code } };
     },
   });
@@ -214,11 +314,32 @@ export default function (pi: ExtensionAPI) {
     label: "Zellij Close Pane",
     description: "Close a Zellij pane by ID.",
     parameters: PaneParams,
-    async execute(_id, params) {
+    async execute(_id, params, _signal, _onUpdate, ctx) {
       const result = await exec(pi, [...sessionArgs(params.session), "action", "close-pane", "--pane-id", params.pane_id], 20_000);
+      upsertTask({ session: params.session, pane_id: params.pane_id, status: result.code === 0 ? "closed" : "unknown" });
+      updateWidget(ctx);
       return { content: [{ type: "text", text: result.code === 0 ? `Closed ${params.pane_id}` : (result.stderr || result.stdout) }], isError: result.code !== 0, details: { exitCode: result.code } };
     },
   });
+
+  pi.registerTool({
+    name: "zellij_tasks",
+    label: "Zellij Tasks",
+    description: "Show Pi-tracked Zellij background tasks and their statuses.",
+    parameters: TasksParams,
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      updateWidget(ctx);
+      const state = readState();
+      const lines = renderTaskLines();
+      return {
+        content: [{ type: "text", text: lines.length ? lines.join("\n") : "No tracked Zellij tasks." }],
+        details: { state_file: STATE_FILE, tasks: state.tasks },
+      };
+    },
+  });
+
+  pi.on("session_start", async (_event, ctx) => updateWidget(ctx));
+  pi.on("before_agent_start", async (_event, ctx) => updateWidget(ctx));
 
   pi.on("tool_call", async (event) => {
     if (event.toolName !== "bash") return;

@@ -7,7 +7,7 @@ allowed-tools:
 
 # Zellij Skill
 
-This skill is the policy map for Pi's Zellij tools. Prefer the custom Pi tools (`zellij_run`, `zellij_subscribe`, `zellij_wait`, `zellij_list`, `zellij_snapshot`, `zellij_close`) when available. Fall back to raw `zellij` shell commands only if the tools are unavailable or you need an unsupported option.
+This skill is the policy map for Pi's Zellij tools. Prefer the custom Pi tools (`zellij_run`, `zellij_subscribe`, `zellij_wait`, `zellij_list`, `zellij_snapshot`, `zellij_close`, `zellij_tasks`) when available. Fall back to raw `zellij` shell commands only if the tools are unavailable or you need an unsupported option.
 
 Use Zellij for multiple concurrent processes (servers, watchers, REPLs, long builds) without blocking the main communication channel.
 
@@ -47,6 +47,19 @@ Typical tool flow:
 3. `zellij_wait` waits for readiness/failure patterns.
 4. `zellij_snapshot` captures final screen state if needed.
 5. `zellij_close` stops the pane when done.
+
+## 3.5 Task State & Toolbar
+
+The custom Zellij extension tracks panes launched by `zellij_run` in `~/.pi/agent/state/zellij-tasks.json` and shows a compact `zellij-tasks` widget in the Pi UI. Use `zellij_tasks` when you need to answer “what background work is already running?” before starting a duplicate server/watcher.
+
+Status updates happen when tools are used:
+
+- `zellij_run` records a new running task
+- `zellij_wait` marks it `ready`, `failed`, or `unknown`
+- `zellij_subscribe` / `zellij_snapshot` refresh the last observed output
+- `zellij_close` marks it `closed`
+
+Prefer checking `zellij_tasks` before spawning long-running work if there may already be related panes.
 
 ## 4. Choose the Right Raw Zellij Mode
 

@@ -28,3 +28,5 @@ rsync -a skills/zellij/ ~/.agents/skills/zellij/
 ```
 
 Then restart Pi or run `/reload`.
+
+Zellij tasks are persisted at `~/.pi/agent/state/zellij-tasks.json` and surfaced in a compact Pi widget.
