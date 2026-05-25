@@ -1,0 +1,11 @@
+{
+  "settings": {
+    "autoAuth": true
+  },
+  "mcpServers": {
+    "clickup": {
+      "url": "https://mcp.clickup.com/mcp",
+      "auth": "oauth"
+    }
+  }
+}

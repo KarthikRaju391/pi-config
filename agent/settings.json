@@ -1,0 +1,31 @@
+{
+  "defaultProvider": "openai-codex",
+  "defaultModel": "gpt-5.5",
+  "defaultThinkingLevel": "low",
+  "hideThinkingBlock": false,
+  "steeringMode": "one-at-a-time",
+  "transport": "auto",
+  "skills": [
+    "~/.agents/skills"
+  ],
+  "enableSkillCommands": true,
+  "packages": [
+    "npm:pi-web-access",
+    "npm:pi-mcp-adapter",
+    "npm:pi-autoresearch"
+  ],
+  "extensions": [
+    "~/.pi/agent/extensions/zellij-tools"
+  ],
+  "terminal": {
+    "showTerminalProgress": true
+  },
+  "enableInstallTelemetry": true,
+  "doubleEscapeAction": "tree",
+  "treeFilterMode": "default",
+  "theme": "dark",
+  "quietStartup": true,
+  "warnings": {
+    "anthropicExtraUsage": true
+  }
+}

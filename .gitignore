@@ -1,0 +1,10 @@
+# secrets / credentials / local state
+auth.json
+account-pool.json
+mcp-oauth/
+mcp-cache.json
+sessions/
+npm/
+node_modules/
+*.log
+.DS_Store
