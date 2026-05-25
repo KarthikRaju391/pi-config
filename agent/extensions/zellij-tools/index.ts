@@ -11,7 +11,9 @@ const S = {
 
 const DEFAULT_SESSION = "agent-observer";
 const DEFAULT_SCROLLBACK = 100;
-const STATE_FILE = path.join(os.homedir(), ".pi", "agent", "state", "zellij-tasks.json");
+const STATE_DIR = path.join(os.homedir(), ".pi", "agent", "state");
+const STATE_FILE = path.join(STATE_DIR, "zellij-tasks.json");
+const EVENTS_DIR = path.join(STATE_DIR, "zellij-events");
 
 type TaskStatus = "starting" | "running" | "ready" | "failed" | "exited" | "closed" | "unknown";
 type ZellijTask = {
@@ -26,6 +28,16 @@ type ZellijTask = {
   updated_at: number;
   last_snapshot?: string;
   last_exit_code?: number | null;
+  notify_agent_on_exit?: boolean;
+  trigger_agent_on_exit?: boolean;
+  event_emitted_at?: number;
+};
+
+type ZellijEvent = {
+  task_id: string;
+  status: "exited" | "failed";
+  exit_code: number;
+  completed_at: number;
 };
 type ZellijState = { version: 1; tasks: ZellijTask[] };
 
@@ -39,6 +51,8 @@ const RunParams = {
     detached: S.boolean("Use/create a detached background session. Default true"),
     direction: S.string("Split direction for attached sessions: right or down. Default right"),
     subscribe: S.boolean("Return subscribe command. Default true"),
+    notify_agent_on_exit: S.boolean("Write a zellij-task-event message when the command exits. Default true"),
+    trigger_agent_on_exit: S.boolean("Automatically wake/continue the agent when the command exits. Default true"),
   },
   required: ["command"],
   additionalProperties: false,
@@ -115,6 +129,11 @@ function writeState(state: ZellijState) {
   fs.renameSync(tmp, STATE_FILE);
 }
 
+function newTaskId(): string {
+  const now = Date.now();
+  return `zt_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
 function upsertTask(patch: Partial<ZellijTask> & { pane_id: string }): ZellijTask {
   const state = readState();
   const now = Date.now();
@@ -122,7 +141,7 @@ function upsertTask(patch: Partial<ZellijTask> & { pane_id: string }): ZellijTas
   const task: ZellijTask = existing
     ? { ...existing, ...patch, updated_at: now }
     : {
-        id: `zt_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+        id: patch.id || newTaskId(),
         session: patch.session,
         pane_id: patch.pane_id,
         name: patch.name || patch.pane_id,
@@ -138,6 +157,35 @@ function upsertTask(patch: Partial<ZellijTask> & { pane_id: string }): ZellijTas
   state.tasks = state.tasks.slice(0, 50);
   writeState(state);
   return task;
+}
+
+function updateTaskById(taskId: string, patch: Partial<ZellijTask>): ZellijTask | undefined {
+  const state = readState();
+  const task = state.tasks.find((t) => t.id === taskId);
+  if (!task) return undefined;
+  const updated = { ...task, ...patch, updated_at: Date.now() };
+  state.tasks[state.tasks.indexOf(task)] = updated;
+  writeState(state);
+  return updated;
+}
+
+function writeEventCommand(taskId: string): string {
+  const nodeCode = `
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const dir = process.argv[1];
+    const taskId = process.argv[2];
+    const code = Number(process.argv[3] || 0);
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const ev = { task_id: taskId, status: code === 0 ? "exited" : "failed", exit_code: code, completed_at: Date.now() };
+    const file = path.join(dir, taskId + "." + Date.now() + ".json");
+    fs.writeFileSync(file, JSON.stringify(ev) + "\\n", { mode: 0o600 });
+  `.replace(/\s+/g, " ");
+  return `node -e ${q(nodeCode)} ${q(EVENTS_DIR)} ${q(taskId)} "$__pi_zellij_code"`;
+}
+
+function wrapCommandForEvent(command: string, taskId: string): string {
+  return `__pi_zellij_emit() { __pi_zellij_code=$?; trap - EXIT; ${writeEventCommand(taskId)}; exit "$__pi_zellij_code"; }; trap __pi_zellij_emit EXIT;\n${command}`;
 }
 
 function statusIcon(status: TaskStatus): string {
@@ -159,6 +207,54 @@ function updateWidget(ctx: any) {
   if (!ctx?.hasUI) return;
   const lines = renderTaskLines();
   ctx.ui.setWidget("zellij-tasks", lines.length ? lines : undefined);
+}
+
+async function handleZellijEvent(pi: ExtensionAPI, ctx: any, event: ZellijEvent, file?: string) {
+  const status: TaskStatus = event.exit_code === 0 ? "exited" : "failed";
+  const task = updateTaskById(event.task_id, {
+    status,
+    last_exit_code: event.exit_code,
+    event_emitted_at: Date.now(),
+  });
+  updateWidget(ctx);
+  if (!task) return;
+
+  const text = `Background Zellij task "${task.name}" ${status} with exit code ${event.exit_code}. Pane: ${task.session || "current"}:${task.pane_id}. Inspect with zellij_snapshot if needed.`;
+  if (ctx?.hasUI) ctx.ui.notify(text, event.exit_code === 0 ? "info" : "error");
+  if (task.notify_agent_on_exit !== false) {
+    pi.sendMessage({
+      customType: "zellij-task-event",
+      content: text,
+      display: true,
+      details: { ...task, status, exit_code: event.exit_code, event_file: file },
+    }, {
+      deliverAs: "followUp",
+      triggerTurn: task.trigger_agent_on_exit !== false,
+    });
+  }
+}
+
+function startEventWatcher(pi: ExtensionAPI, ctx: any): fs.FSWatcher | undefined {
+  fs.mkdirSync(EVENTS_DIR, { recursive: true, mode: 0o700 });
+  const seen = new Set<string>();
+  const processFile = (name: string) => {
+    if (!name.endsWith(".json")) return;
+    const file = path.join(EVENTS_DIR, name);
+    if (seen.has(file)) return;
+    setTimeout(async () => {
+      try {
+        if (seen.has(file)) return;
+        const event = JSON.parse(fs.readFileSync(file, "utf8")) as ZellijEvent;
+        seen.add(file);
+        await handleZellijEvent(pi, ctx, event, file);
+        fs.renameSync(file, `${file}.processed`);
+      } catch {
+        // File may still be being written, or may have been removed. Next fs event/manual refresh can retry.
+      }
+    }, 100);
+  };
+  for (const name of fs.readdirSync(EVENTS_DIR)) processFile(name);
+  return fs.watch(EVENTS_DIR, (_event, filename) => filename && processFile(String(filename)));
 }
 
 function q(s: string): string {
@@ -193,6 +289,8 @@ function looksLongRunning(command: string): boolean {
 }
 
 export default function (pi: ExtensionAPI) {
+  let eventWatcher: fs.FSWatcher | undefined;
+
   pi.registerTool({
     name: "zellij_run",
     label: "Zellij Run",
@@ -204,6 +302,10 @@ export default function (pi: ExtensionAPI) {
       const name = params.name || "pi-task";
       const direction = params.direction || "right";
       const cwd = params.cwd || ctx.cwd;
+      const taskId = newTaskId();
+      const notifyAgentOnExit = params.notify_agent_on_exit !== false;
+      const triggerAgentOnExit = params.trigger_agent_on_exit !== false;
+      const command = wrapCommandForEvent(params.command, taskId);
 
       if (detached) {
         await exec(pi, ["attach", "--create-background", session, "options", "--web-sharing", "on", "--web-server", "true"], 20_000);
@@ -216,14 +318,14 @@ export default function (pi: ExtensionAPI) {
         "--cwd", cwd,
       ];
       if (!detached) args.push("-d", direction);
-      args.push("--", "zsh", "-ic", params.command);
+      args.push("--", "zsh", "-ic", command);
 
       const result = await exec(pi, args, 30_000);
       if (result.code !== 0) {
         return { content: [{ type: "text", text: `Failed to create Zellij pane:\n${result.stderr || result.stdout}` }], isError: true, details: { exitCode: result.code } };
       }
       const paneId = result.stdout.trim().split(/\s+/).find((x) => x.startsWith("terminal_") || x.startsWith("plugin_")) || result.stdout.trim();
-      const task = upsertTask({ session, pane_id: paneId, name, cwd, command: params.command, status: "running" });
+      const task = upsertTask({ id: taskId, session, pane_id: paneId, name, cwd, command: params.command, status: "running", notify_agent_on_exit: notifyAgentOnExit, trigger_agent_on_exit: triggerAgentOnExit });
       updateWidget(ctx);
       const subscribeCommand = makeSubscribeCommand(session, paneId);
       return {
@@ -338,7 +440,15 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.on("session_start", async (_event, ctx) => updateWidget(ctx));
+  pi.on("session_start", async (_event, ctx) => {
+    eventWatcher?.close();
+    eventWatcher = startEventWatcher(pi, ctx);
+    updateWidget(ctx);
+  });
+  pi.on("session_shutdown", async () => {
+    eventWatcher?.close();
+    eventWatcher = undefined;
+  });
   pi.on("before_agent_start", async (_event, ctx) => updateWidget(ctx));
 
   pi.on("tool_call", async (event) => {

@@ -61,6 +61,12 @@ Status updates happen when tools are used:
 
 Prefer checking `zellij_tasks` before spawning long-running work if there may already be related panes.
 
+### Automatic completion events
+
+`zellij_run` wraps commands so that when the pane command exits, it writes a completion event under `~/.pi/agent/state/zellij-events/`. The extension watches that directory, updates task state, refreshes the widget, and injects a custom Pi message with `customType: "zellij-task-event"`. By default, completion events use `triggerTurn: true`, so the agent can continue automatically when a background task finishes or fails instead of waiting for the user to mention it.
+
+Use `notify_agent_on_exit: false` or `trigger_agent_on_exit: false` only when the task is intentionally noisy or irrelevant to the current agent flow.
+
 ## 4. Choose the Right Raw Zellij Mode
 
 ### Mode A: Non-Interactive (background processes, builds, servers)
