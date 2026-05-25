@@ -193,20 +193,42 @@ function statusIcon(status: TaskStatus): string {
   return ({ starting: "⏳", running: "▶", ready: "✅", failed: "❌", exited: "■", closed: "×", unknown: "?" } as Record<TaskStatus, string>)[status] || "?";
 }
 
-function renderTaskLines(): string[] {
+function age(ms: number): string {
+  const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  return `${h}h${m % 60}m`;
+}
+
+function pad(s: string, n: number): string { return s.length > n ? `${s.slice(0, Math.max(0, n - 1))}…` : s.padEnd(n); }
+
+function renderTaskLines(expanded = false): string[] {
   const tasks = readState().tasks;
-  const active = tasks.filter((t) => !["closed", "exited", "failed"].includes(t.status));
-  if (tasks.length === 0) return [];
-  const counts = tasks.reduce<Record<string, number>>((acc, t) => ((acc[t.status] = (acc[t.status] || 0) + 1), acc), {});
-  const summary = `🧩 zellij ${active.length} active / ${tasks.length} tracked` +
-    Object.entries(counts).map(([k, v]) => ` · ${k}:${v}`).join("");
-  const recent = tasks.slice(0, 3).map((t) => `${statusIcon(t.status)} ${t.name} ${t.session ? `${t.session}:` : ""}${t.pane_id}`);
+  const activeStatuses = new Set<TaskStatus>(["starting", "running", "ready", "unknown"]);
+  const active = tasks.filter((t) => activeStatuses.has(t.status));
+
+  if (expanded) {
+    if (tasks.length === 0) return ["🧩 zellij tasks: none"];
+    const rows = tasks.slice(0, 12).map((t) => `${statusIcon(t.status)} ${pad(t.status, 8)} ${pad(t.name, 24)} ${pad(`${t.session || "current"}:${t.pane_id}`, 32)} ${pad(age(t.created_at), 7)} exit:${t.last_exit_code ?? "-"}`);
+    return [
+      `─── 🧩 zellij tasks · ${active.length} active / ${tasks.length} tracked · alt+z collapse ───`,
+      `  ${pad("status", 8)} ${pad("name", 24)} ${pad("pane", 32)} ${pad("age", 7)} exit`,
+      ...rows,
+    ];
+  }
+
+  if (active.length === 0) return [];
+  const counts = active.reduce<Record<string, number>>((acc, t) => ((acc[t.status] = (acc[t.status] || 0) + 1), acc), {});
+  const summary = `🧩 zellij ${active.length} active` + Object.entries(counts).map(([k, v]) => ` · ${k}:${v}`).join("") + " · alt+z expand";
+  const recent = active.slice(0, 3).map((t) => `${statusIcon(t.status)} ${t.name} ${t.session ? `${t.session}:` : ""}${t.pane_id}`);
   return [summary, ...recent];
 }
 
-function updateWidget(ctx: any) {
+function updateWidget(ctx: any, expanded = false) {
   if (!ctx?.hasUI) return;
-  const lines = renderTaskLines();
+  const lines = renderTaskLines(expanded);
   ctx.ui.setWidget("zellij-tasks", lines.length ? lines : undefined);
 }
 
@@ -305,6 +327,8 @@ function looksLongRunning(command: string): boolean {
 
 export default function (pi: ExtensionAPI) {
   let eventWatcher: fs.FSWatcher | undefined;
+  let dashboardExpanded = false;
+  const refreshWidget = (ctx: any) => updateWidget(ctx, dashboardExpanded);
 
   pi.registerTool({
     name: "zellij_run",
@@ -359,7 +383,7 @@ export default function (pi: ExtensionAPI) {
       // The wrapped command is intentionally verbose; rename the visible pane back to the task name.
       await exec(pi, [...sessionArgs(session), "action", "rename-pane", "--pane-id", paneId, name], 10_000).catch(() => undefined);
       const task = upsertTask({ id: taskId, session, pane_id: paneId, name, cwd, command: params.command, status: "running", notify_agent_on_exit: notifyAgentOnExit, trigger_agent_on_exit: triggerAgentOnExit });
-      updateWidget(ctx);
+      refreshWidget(ctx);
       const subscribeCommand = makeSubscribeCommand(session, paneId);
       return {
         content: [{ type: "text", text: `Started ${q(params.command)} in ${session}:${paneId}\nMonitor with:\n${subscribeCommand}` }],
@@ -380,7 +404,7 @@ export default function (pi: ExtensionAPI) {
       const shell = `${makeSubscribeCommand(params.session, params.pane_id, scrollback).replace("--format json", `--format ${format}`)} & pid=$!; sleep ${seconds}; kill $pid 2>/dev/null; wait $pid 2>/dev/null || true`;
       const result = await pi.exec("bash", ["-lc", shell], { timeout: (seconds + 5) * 1000 });
       upsertTask({ session: params.session, pane_id: params.pane_id, status: result.code === 0 ? "running" : "unknown", last_snapshot: (result.stdout || result.stderr || "").slice(-4000) });
-      updateWidget(ctx);
+      refreshWidget(ctx);
       return { content: [{ type: "text", text: result.stdout || result.stderr || "" }], details: { exitCode: result.code } };
     },
   });
@@ -415,7 +439,7 @@ export default function (pi: ExtensionAPI) {
       const ok = result.code === 0;
       const failed = result.code === 2;
       upsertTask({ session: params.session, pane_id: params.pane_id, status: ok ? "ready" : failed ? "failed" : "unknown", last_snapshot: (result.stdout || result.stderr || "").slice(-4000) });
-      updateWidget(ctx);
+      refreshWidget(ctx);
       return { content: [{ type: "text", text: ok ? `Matched ${params.pattern}\n${result.stdout}` : `${failed ? "Fail pattern matched" : `Did not match ${params.pattern}`} (exit ${result.code})\n${result.stdout || result.stderr}` }], isError: !ok, details: { exitCode: result.code } };
     },
   });
@@ -439,7 +463,7 @@ export default function (pi: ExtensionAPI) {
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const result = await exec(pi, [...sessionArgs(params.session), "action", "dump-screen", "--pane-id", params.pane_id, "--full"], 20_000);
       upsertTask({ session: params.session, pane_id: params.pane_id, status: result.code === 0 ? "running" : "unknown", last_snapshot: (result.stdout || result.stderr || "").slice(-4000) });
-      updateWidget(ctx);
+      refreshWidget(ctx);
       return { content: [{ type: "text", text: result.stdout || result.stderr }], isError: result.code !== 0, details: { exitCode: result.code } };
     },
   });
@@ -452,7 +476,7 @@ export default function (pi: ExtensionAPI) {
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const result = await exec(pi, [...sessionArgs(params.session), "action", "close-pane", "--pane-id", params.pane_id], 20_000);
       upsertTask({ session: params.session, pane_id: params.pane_id, status: result.code === 0 ? "closed" : "unknown" });
-      updateWidget(ctx);
+      refreshWidget(ctx);
       return { content: [{ type: "text", text: result.code === 0 ? `Closed ${params.pane_id}` : (result.stderr || result.stdout) }], isError: result.code !== 0, details: { exitCode: result.code } };
     },
   });
@@ -463,9 +487,9 @@ export default function (pi: ExtensionAPI) {
     description: "Show Pi-tracked Zellij background tasks and their statuses.",
     parameters: TasksParams,
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      updateWidget(ctx);
+      refreshWidget(ctx);
       const state = readState();
-      const lines = renderTaskLines();
+      const lines = renderTaskLines(true);
       return {
         content: [{ type: "text", text: lines.length ? lines.join("\n") : "No tracked Zellij tasks." }],
         details: { state_file: STATE_FILE, tasks: state.tasks },
@@ -473,10 +497,31 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("zellij-dashboard", {
+    description: "Toggle or control the Zellij task dashboard. Usage: /zellij-dashboard [toggle|expand|collapse]",
+    handler: async (args, ctx) => {
+      const action = (args || "toggle").trim();
+      if (action === "expand") dashboardExpanded = true;
+      else if (action === "collapse") dashboardExpanded = false;
+      else dashboardExpanded = !dashboardExpanded;
+      refreshWidget(ctx);
+      ctx.ui.notify(`zellij dashboard ${dashboardExpanded ? "expanded" : "collapsed"}`, "info");
+    },
+  });
+
+  pi.registerShortcut("alt+z", {
+    description: "Toggle Zellij task dashboard",
+    handler: async (ctx) => {
+      dashboardExpanded = !dashboardExpanded;
+      refreshWidget(ctx);
+      ctx.ui.notify(`zellij dashboard ${dashboardExpanded ? "expanded" : "collapsed"}`, "info");
+    },
+  });
+
   pi.on("session_start", async (_event, ctx) => {
     eventWatcher?.close();
     eventWatcher = startEventWatcher(pi, ctx);
-    updateWidget(ctx);
+    refreshWidget(ctx);
   });
   pi.on("session_shutdown", async () => {
     eventWatcher?.close();

@@ -63,6 +63,8 @@ Prefer checking `zellij_tasks` before spawning long-running work if there may al
 
 Default layout policy: open background observer tasks as tabs (`placement: "tab"`) so each task has a visible full pane. Use pane splits only for tightly related subtasks, and keep at most two panes per tab.
 
+The collapsed widget only shows active/actionable tasks. Use `/zellij-dashboard toggle` or `alt+z` to expand/collapse the full task-history table.
+
 ### Automatic completion events
 
 `zellij_run` wraps commands so that when the pane command exits, it writes a completion event under `~/.pi/agent/state/zellij-events/`. The extension watches that directory, updates task state, refreshes the widget, and injects a custom Pi message with `customType: "zellij-task-event"`. By default, completion events use `triggerTurn: true`, so the agent can continue automatically when a background task finishes or fails instead of waiting for the user to mention it.
