@@ -515,11 +515,12 @@ export default function (pi: ExtensionAPI) {
         }
       }
       let kept = state.tasks;
-      if (mode === "stopped") kept = state.tasks.filter((t) => activeStatuses.has(t.status));
+      if (mode === "active") kept = state.tasks.filter((t) => !activeStatuses.has(t.status));
+      else if (mode === "stopped") kept = state.tasks.filter((t) => activeStatuses.has(t.status));
       else if (mode === "all") kept = [];
       writeState({ version: 1, tasks: kept });
       refreshWidget(ctx);
-      ctx.ui.notify(`zellij cleanup ${mode}: closed ${closed}, tracking ${kept.length}`, "info");
+      ctx.ui.notify(`zellij cleanup ${mode}: closed ${closed}, cleared ${state.tasks.length - kept.length}, tracking ${kept.length}`, "info");
     },
   });
 
