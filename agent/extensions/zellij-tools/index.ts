@@ -356,6 +356,8 @@ export default function (pi: ExtensionAPI) {
       if (result.code !== 0 || !paneId) {
         return { content: [{ type: "text", text: `Failed to create Zellij ${placement}:\n${result.stderr || result.stdout}` }], isError: true, details: { exitCode: result.code, tab_id: tabId } };
       }
+      // The wrapped command is intentionally verbose; rename the visible pane back to the task name.
+      await exec(pi, [...sessionArgs(session), "action", "rename-pane", "--pane-id", paneId, name], 10_000).catch(() => undefined);
       const task = upsertTask({ id: taskId, session, pane_id: paneId, name, cwd, command: params.command, status: "running", notify_agent_on_exit: notifyAgentOnExit, trigger_agent_on_exit: triggerAgentOnExit });
       updateWidget(ctx);
       const subscribeCommand = makeSubscribeCommand(session, paneId);
